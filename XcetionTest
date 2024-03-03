@@ -37,6 +37,7 @@ from sklearn.metrics import f1_score, roc_auc_score, roc_curve, auc, confusion_m
 #setting the gpu
 gpus = tf.config.experimental.list_physical_devices('GPU')
 tf.config.experimental.set_memory_growth(gpus[0], True)
+tf.config.experimental_run_functions_eagerly(True)
 
 # model architecture
 '''
@@ -485,7 +486,7 @@ for i in range(3):
         p.sample(ERNC) #calling a new image to be made from the dataset 1059 times, so all the images will get there own edited version
 '''
 
-
+batch_size = 10
 train_datagen = ImageDataGenerator(
     rotation_range=180,
     width_shift_range=0.1,
@@ -500,7 +501,7 @@ train_datagen = ImageDataGenerator(
 train_generator = train_datagen.flow_from_directory(
     "/mnt/c/Users/owner/OneDrive/שולחן העבודה/archive (1)/IHC4BC_Compressed/Images/HandE/model_usage_data/training_part",
     target_size=(299, 299),
-    batch_size=32,
+    batch_size=batch_size,
     class_mode='binary',
     shuffle=True
 )
@@ -519,7 +520,7 @@ validation_datagen = ImageDataGenerator(
 validation_generator = validation_datagen.flow_from_directory(
     "/mnt/c/Users/owner/OneDrive/שולחן העבודה/archive (1)/IHC4BC_Compressed/Images/HandE/model_usage_data/validation_part",
     target_size=(299, 299),
-    batch_size=32,
+    batch_size=batch_size,
     class_mode='binary',
     shuffle=True
 )
@@ -532,7 +533,7 @@ test_datagen = ImageDataGenerator(
 test_generator = test_datagen.flow_from_directory(
     "/mnt/c/Users/owner/OneDrive/שולחן העבודה/archive (1)/IHC4BC_Compressed/Images/HandE/model_usage_data/testing_part",
     target_size=(299, 299),
-    batch_size=32,
+    batch_size=batch_size,
     class_mode='binary',
     shuffle=True
 )
@@ -632,7 +633,7 @@ def build_model_with_attention(turn):
     pooled_output = GlobalAveragePooling2D()(attention_output)
 
     # Apply dropout to the pooled output
-    dropped_output = Dropout(0.5)(pooled_output)
+    dropped_output = Dropout(0.2)(pooled_output)
 
     # Add a new final layer for binary classification with L2 regularization
     outputs = Dense(1, activation='sigmoid', kernel_regularizer=tf.keras.regularizers.l2(1e-4))(dropped_output)
@@ -672,7 +673,7 @@ early_stopping = keras.callbacks.EarlyStopping(monitor='val_loss', patience=10)
 
 # Fit the model using the data generators
 tf.keras.backend.clear_session()
-epochs = 10  # Adjust the number of epochs as needed
+epochs = 5  # Adjust the number of epochs as needed
 history = model_with_attention.fit(
     train_generator,
     steps_per_epoch=len(train_generator)/10,
@@ -684,57 +685,36 @@ history = model_with_attention.fit(
     workers=4  # Adjust based on your GPU cores
 )
 
-def generate_activation_and_silency_maps(model, image_path, hm_saving_path, silency_maps_saving_path, layer_name='block14_sepconv2_act'):
-    # Load and preprocess the image
-    img = Image.open(image_path)
-    img = img.resize((299, 299))  # Xception input size
-    x = np.expand_dims(img, axis=0)
-
-    # Get the intermediate layer activations
-    intermediate_layer_model = Model(inputs=model.input, outputs=model.get_layer(layer_name).output)
-    intermediate_layer_activation = intermediate_layer_model.predict(x)
-
-    # Create a directory to save activation maps
-    if not os.path.exists(hm_saving_path):
-        os.makedirs(hm_saving_path)
-
-    # Save each channel of the intermediate layer activations as an image
-    for i in range(intermediate_layer_activation.shape[-1]):
-        activation = intermediate_layer_activation[0, :, :, i]
-        plt.imsave(os.path.join(hm_saving_path, f'activation_map_channel_{i}.png'), activation, cmap='hot')
-
-    #preprocess image to get it into the right format for the model
-    img = keras.preprocessing.image.img_to_array(img)
-    img = img.reshape((1, *img.shape))
-    y_pred = model.predict(img)
-
-    images = tf.Variable(img, dtype=float)
+def generate_activation_and_saliency_maps(model, image_path, hm_saving_path, saliency_maps_saving_path, layer_name='dense'):
+    input_img = np.array(Image.open(image_path))
+    input_img = np.expand_dims(input_img, axis=0)
+    
+    y_pred = model.predict(input_img)
+    images = tf.Variable(input_img, dtype=float)
 
     with tf.GradientTape() as tape:
         pred = model(images, training=False)
         class_idxs_sorted = np.argsort(pred.numpy().flatten())[::-1]
         loss = pred[0][class_idxs_sorted[0]]
-        
+    
     grads = tape.gradient(loss, images)
     dgrad_abs = tf.math.abs(grads)
     dgrad_max_ = np.max(dgrad_abs, axis=3)[0]
-    # normalize to range between 0 and 1
     arr_min, arr_max  = np.min(dgrad_max_), np.max(dgrad_max_)
     grad_eval = (dgrad_max_ - arr_min) / (arr_max - arr_min + 1e-18)
-    print(grad_eval)
-    # Normalize grad_eval to the range [0, 255]
-    grad_eval_normalized = (grad_eval * 255).astype(np.uint8)
-    print(grad_eval_normalized)
 
-    # Save the superimposed image using PIL
-    image_path = os.path.join(silency_maps_saving_path, "superimposed_image.jpg")
-    Image.fromarray(grad_eval_normalized).save(os.path.join(silency_maps_saving_path, "superimposed_image.jpg"))
+    # Create a directory to save saliency maps
+    if not os.path.exists(saliency_maps_saving_path):
+        os.makedirs(saliency_maps_saving_path)
+
+    # Save the heatmap
+    plt.imsave(os.path.join(saliency_maps_saving_path, 'saliency_map.png'), grad_eval, cmap='jet')
 
 # Generate activation maps for an example image
 example_image_path = '/mnt/c/Users/owner/OneDrive/שולחן העבודה/archive (1)/IHC4BC_Compressed/Images/HandE/model_usage_data/training_part/ER+/Patient_1_2011Subregion_01_2011_0_2_412.jpg'
 activation_maps_saving_path = '/mnt/c/Users/owner/OneDrive/שולחן העבודה/archive (1)/IHC4BC_Compressed/Images/HandE/model_usage_data/heatmaps_and_more'
 silency_maps_saving_path = '/mnt/c/Users/owner/OneDrive/שולחן העבודה/archive (1)/IHC4BC_Compressed/Images/HandE/model_usage_data/silency_maps_and_more'
-generate_activation_and_silency_maps(model_with_attention, example_image_path, activation_maps_saving_path, silency_maps_saving_path)
+generate_activation_and_saliency_maps(model_with_attention, example_image_path, activation_maps_saving_path, silency_maps_saving_path)
 
 # Assuming you have true labels and predicted labels
 true_labels =  test_generator.classes
